@@ -102,9 +102,7 @@ class FluxEquilibriumClustering:
             distance = np.linalg.norm(large_centers - s_cluster_center, axis=1)
             closest_l = large_clusters[np.argmin(distance)]
             post_merge[post_merge == s_cluster] = closest_l
-
-        unique_values, merged = np.unique(post_merge, return_inverse=True)  #grab the values of where to merge
-        return merged
+        return post_merge
 
     def fit(self, X: np.ndarray) -> "FluxEquilibriumClustering":
         """Compute cluster labels for *X*.
@@ -156,7 +154,7 @@ class FluxEquilibriumClustering:
             for j_num, j in enumerate(kNN_neighbors[i]):
                 w_ij[i,j_num] = np.exp(-pairwise_distances[i,j]/(self.sigma**2))
 
-        #if 1 is neighbors with 2, 2 should be neighbors with 1
+        #if 1 is neighbors with 2, 2 is neighbors with 1
         kNN_neighbors_all = []
         for i in range(n):
             kNN_neighbors_all.append(set(kNN_neighbors[i]))
@@ -169,8 +167,6 @@ class FluxEquilibriumClustering:
         for i in range (n):
             for j in kNN_neighbors_all[i]:
                 edge_weights[i,j] = np.exp(-pairwise_distances[i,j]/(self.sigma**2))
-
-
 
         #2. initialize flux
         f_1 = np.zeros((self.T+1, n))  #to store at each t
@@ -227,7 +223,7 @@ class FluxEquilibriumClustering:
             if sinks_check[i] == True:  #sink node
                 continue
             if not np.any(downhill_edge_weights[i] >0): #dead end
-                next_steepest[i] = sinks[argmin(pairwise_distances[i, sinks])]  #go to nearest instead
+                next_steepest[i] = sinks[np.argmin(pairwise_distances[i, sinks])]  #go to nearest instead
             else:
                 steepest = np.argmax(np.where(downhill_edge_weights[i] > 0, final_flux_out[i], -np.inf))  #flux if downhill, else -inf
                 next_steepest[i] = steepest
@@ -253,7 +249,7 @@ class FluxEquilibriumClustering:
                 current = next_steepest[current]
 
             if cycle_found:  #if hit endless cycle make node a sink
-                new_sink = current
+                new_sink = current   #make the node that caused the cycle be the sink
                 sinks_check[new_sink] = True
                 sink_labels[new_sink] = len(sinks)
                 sinks = np.append(sinks, new_sink)

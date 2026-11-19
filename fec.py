@@ -216,7 +216,9 @@ class FluxEquilibriumClustering:
             s_min = max(2, int(n / 20))  # getting min to see if clusters need to be merges
             small = cluster[counts < s_min]  #grouping small v large clusters found
             large = cluster[counts >= s_min]
-            if len(small) == 0:  #no small clusters
+            if len(small) == 0:  #no small clusters to merge
+                break
+            if len(large) == 0:  #no large clusters to merge into
                 break
 
             large_centers = []

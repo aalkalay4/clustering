@@ -72,38 +72,6 @@ class FluxEquilibriumClustering:
         if self.beta != 0:
             return f**self.beta
 
-
-    def merge_small(self, X, current, n):
-        post_merge = current.copy()
-        ids, counts = np.unique(post_merge, return_counts=True) #finds how many per cluster
-        if len(ids) <= 1:                                   #only 1 cluster
-            return post_merge
-        s_min = max(2, int(n / 20))   #checking if any cluster has less than min
-        large = counts >= s_min
-        small = counts < s_min
-        if not np.any(small):  #if none are small, all good!
-            return post_merge
-        if not np.any(large):  #if they're all small, there is no next big one, put them all together in biggest?
-            big_cluster = ids[np.argmax(counts)]
-            return np.full_like(post_merge, big_cluster)  #fill all with big cluster
-        #if some small clusters, move them to large ones near
-        large_clusters = ids[large]
-        small_clusters = ids[small]
-        large_centers = []
-        for l_cluster in large_clusters:    #find store the center of each large cluster
-            points = X[post_merge == l_cluster]
-            cluster_center = points.mean(axis=0)
-            large_centers.append(cluster_center)
-        large_centers = np.array(large_centers)
-
-        for s_cluster in small_clusters:    #move small ones to nearest large one
-            s_points = X[post_merge == s_cluster]
-            s_cluster_center = s_points.mean(axis=0)
-            distance = np.linalg.norm(large_centers - s_cluster_center, axis=1)
-            closest_l = large_clusters[np.argmin(distance)]
-            post_merge[post_merge == s_cluster] = closest_l
-        return post_merge
-
     def fit(self, X: np.ndarray) -> "FluxEquilibriumClustering":
         """Compute cluster labels for *X*.
 
@@ -130,10 +98,10 @@ class FluxEquilibriumClustering:
         n = X.shape[0]
         if n == 0:
             raise ValueError("n cannot be zero")
+
         #1. pre-compute
         self.global_centroid = X.mean(axis=0)
         self.centroid_distances = np.linalg.norm(X - self.global_centroid, axis=1)
-
 
         subtracted = X[:,None,:] - X[None,:,:]                  #stretching in both directions to broadcast then xi-xj
         pairwise_distances = np.sum(subtracted**2, axis=-1)     #axis -1 to sum over last dimension
@@ -152,7 +120,7 @@ class FluxEquilibriumClustering:
         w_ij = np.zeros((n, keff)) #only want k nearest for each
         for i in range (n):
             for j_num, j in enumerate(kNN_neighbors[i]):
-                w_ij[i,j_num] = np.exp(-pairwise_distances[i,j]/(self.sigma**2))
+                w_ij[i,j_num] = np.exp(-pairwise_distances[i,j] / (self.sigma**2))
 
         #if 1 is neighbors with 2, 2 is neighbors with 1
         kNN_neighbors_all = []
@@ -166,119 +134,108 @@ class FluxEquilibriumClustering:
         edge_weights = np.zeros((n,n))
         for i in range (n):
             for j in kNN_neighbors_all[i]:
-                edge_weights[i,j] = np.exp(-pairwise_distances[i,j]/(self.sigma**2))
+                edge_weights[i,j] = np.exp(-pairwise_distances[i,j] / (self.sigma**2))
 
         #2. initialize flux
         f_1 = np.zeros((self.T+1, n))  #to store at each t
-        f_1[0,:] = 1                   #initializing all f(0) = 1
+        f_1[0] = 1                   #initializing all f(0) = 1
 
         #3. simulate flow
-        #downhill criteria
-        downhill_check = self.centroid_distances[None,:] <= (self.centroid_distances[:,None] + (.1 * self.sigma))
-        downhill_edge_weights = np.where(downhill_check, edge_weights, 0)  #keep values for downhill, else 0
-
-        np.fill_diagonal(downhill_edge_weights, 0)  #fill self with zero too
-
         #flux aware edge weights
-        final_outgoing = np.zeros(n)  #adding in loop for sink check later
-
+        change = []
         for t in range(self.T):
-            f_t = f_1[t]
             phi=FluxEquilibriumClustering.compute_phi(self,t,f_1[t])
-            if np.ndim(phi) == 0:  #if phi = 1 (not an array) no change
-                flux_edge = downhill_edge_weights
-            else:
-                flux_edge = phi[:,None] * downhill_edge_weights  #need to flatten phi if it isn't 1 then apply to edge weights
+            if np.ndim(phi) == 0:  #if phi = 1 (not an array) make all that value
+                phi = np.full(n, phi)
 
-            #summing
-            weight_sum = np.sum(flux_edge, axis=1, keepdims=True) # (n,1) to divide later
-            weight_sum[weight_sum == 0] = 1 #to catch /0
-            #send flux along each edge formula
-            flux_out = self.alpha * f_t[:,None] * flux_edge / weight_sum
-             #storing last flux out
-            if t == self.T - 1:
-                final_flux_out = flux_out.copy()
-
-            total_out = np.sum(flux_out, axis=1) #total sent
-            final_outgoing = total_out           #only need the last one stored
-            total_in = np.sum(flux_out, axis=0)      #total received
-
-            f_1[t + 1] = f_t - total_out + total_in
+            change_t = np.zeros((n, keff))
+            outgoing = np.zeros(n)
+            incoming = np.zeros(n)
+            for i in range(n):
+                neighbors = [j for j in kNN_neighbors[i]
+                             if self.centroid_distances[j] <= self.centroid_distances[i] + (.1 * self.sigma)]  #downhill check
+                if len(neighbors) == 0:
+                    continue #sink
+                flux_weight = phi[neighbors] * edge_weights[i, neighbors]              #adjusted flux_weight of neighbors with phi
+                changes = self.alpha * flux_weight * f_1[t][i] / np.sum(flux_weight)   #given formula of sending flux
+                change_t[i, :len(changes)] = changes
+                outgoing[i] = np.sum(changes)
+                for j,c in zip(neighbors,changes):
+                    incoming[j] += c
+            change.append(change_t)
+            f_1[t+1] = f_1[t] - outgoing + incoming  #flux at each after iteration
 
         #4. detect sinks
-        final_flux = f_1[-1]  #flux at final iteration
-        sinks_check = (final_outgoing < self. epsilon) & (final_flux > np.mean(final_flux))  #last one (T is out of range because this gets it to T)
+        sinks_check = outgoing < self. epsilon  #checks for sinks with final outgoing flux at each node
         if not np.any(sinks_check):  #if no sinks found, point closest to centroid is now sink
             sinks_check[np.argmin(self.centroid_distances)] = True
-        sinks = np.where(sinks_check)
-        sinks = sinks[0]  #want to keep the array in the tuple that gives
+        sinks = np.where(sinks_check)  #actual locations of the sinks
+        sinks = sinks[0]  #want to keep the array in the tuple from np.where
 
         #5. assign clusters w cycle detection
-        sink_labels = np.full(n, -1)
-        for index, is_sink in enumerate(sinks):
-            sink_labels[is_sink] = index
+        sink_l = np.full(n, -1)   #sink cluster label l
+        for index, is_sink in enumerate(sinks):  #each sink gets unique cluster label
+            sink_l[is_sink] = index
 
-        next_steepest = np.full(n, -1)
+        steepest = np.full(n, -1)  # to hold each steepest neighbor for non sinks
         for i in range(n):
-            if sinks_check[i] == True:  #sink node
+            if sink_l[i] != -1:  # sink
                 continue
-            if not np.any(downhill_edge_weights[i] >0): #dead end
-                next_steepest[i] = sinks[np.argmin(pairwise_distances[i, sinks])]  #go to nearest instead
-            else:
-                steepest = np.argmax(np.where(downhill_edge_weights[i] > 0, final_flux_out[i], -np.inf))  #flux if downhill, else -inf
-                next_steepest[i] = steepest
-
-
-        #cycle detection
-        labels = np.full(n, -1)
-        labels[sinks_check] = sink_labels[sinks_check]
-        cycle_labels = set()
+            # find neighbors again to check steepest
+            neighbors = [j for j in kNN_neighbors[i]
+                         if self.centroid_distances[j] <= self.centroid_distances[i] + (.1 * self.sigma)]  # downhill check
+            steepest_loc = np.argmax(change[-1][i, :len(neighbors)])    #see which of nearest neighbor is steepest in terms of change in flux
+            steepest[i] = neighbors[steepest_loc]  #storing which neighbor it is
+        sink_count = len(sinks)
         for i in range(n):
-            if labels[i] != -1:
+            if sink_l[i] != -1:
                 continue
             path = []
             current = i
-            seen = set()
-            cycle_found = False
-            while labels[current] == -1:  #not a sink
-                if current in seen:   #cycle
-                    cycle_found = True
+            seen = {}  #to store nodes/positions
+            while True:
+                if sink_l[current] != -1:  #path reached a sink
+                    for each_step in path:
+                        sink_l[each_step] = sink_l[current]  #to assign all nodes in the same path the cluster label as sink
+                    break  #do not stay in path after sink
+                if current in seen:   #already hit node in path --> cycle
+                    sink_l[current] = sink_count  #add next sink cluster label
+                    sink_count += 1
+                    for each_step in path:
+                        sink_l[each_step] = sink_l[current] #label all steps in path the same sink node
                     break
-                seen.add(current)
-                path.append(current)
-                current = next_steepest[current]
-
-            if cycle_found:  #if hit endless cycle make node a sink
-                new_sink = current   #make the node that caused the cycle be the sink
-                sinks_check[new_sink] = True
-                sink_labels[new_sink] = len(sinks)
-                sinks = np.append(sinks, new_sink)
-                new_label = sink_labels[new_sink]
-                cycle_labels.add(new_label)
-            else:
-                new_label = labels[current]
-            for node in path:
-                labels[node] = new_label
+                seen[current] = len(path)
+                path.append(current)   #keep track of current path
+                current = steepest[current]
 
         #6. post processing: small cluster merging
-        for l_cycle in list(cycle_labels):
-            cycle_center = X[labels == l_cycle].mean(axis=0)
-            best = np.inf #first will always be better
-            best_label = None
-            for l_other in np.unique(labels):
-                if l_other == l_cycle:
-                    continue
-                other_center = X[labels == l_other].mean(axis=0)
-                distance = np.linalg.norm(other_center - cycle_center)
-                if distance < best:
-                    best = distance
-                    best_label = l_other
-            labels[labels == l_cycle] = best_label
+        while True:
+            cluster, counts = np.unique(sink_l, return_counts=True)  # finds how many per cluster
+            if len(cluster) <= 1:  # only 1 cluster
+                break
+            s_min = max(2, int(n / 20))  # getting min to see if clusters need to be merges
+            small = cluster[counts < s_min]  #grouping small v large clusters found
+            large = cluster[counts >= s_min]
+            if len(small) == 0:  #no small clusters
+                break
 
-        labels = self.merge_small(X, labels, n)
+            large_centers = []
+            for l_cluster in large:  # find store the center of each large cluster
+                points = X[sink_l == l_cluster]       #points in the cluster
+                cluster_center = points.mean(axis=0)  #centroid
+                large_centers.append(cluster_center)
+            large_centers = np.array(large_centers)
 
-        flux = final_flux
+            for s_cluster in small:  # move small ones to nearest large one
+                s_points = X[sink_l == s_cluster]         #points in the cluster
+                s_cluster_center = s_points.mean(axis=0)  #centroid
+                distance = np.linalg.norm(large_centers - s_cluster_center, axis=1)
+                closest_l = large[np.argmin(distance)]    #nearest large centroid
+                sink_l[sink_l == s_cluster] = closest_l   #merging the small one into the near large one
+
+        flux = f_1[-1]
         sinks = sinks_check
+        labels = sink_l
 
         # ---- DO NOT CHANGE THE REST OF THIS METHOD ---- #
         # We require you maintain these attributes for testing purpose.
